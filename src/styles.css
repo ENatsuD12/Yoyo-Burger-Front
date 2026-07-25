@@ -1,3 +1,49 @@
-/* You can add global styles to this file, and also import other style files */
+@import "tailwindcss";
 
-@import 'tailwindcss';
+:root {
+  --verde-header: #075E54;
+  --verde-claro: #128C7E;
+  --verde-accion: #25D366;
+  --burbuja-out: #DCF8C6;
+  --burbuja-in: #FFFFFF;
+  --fondo-chat: #ECE5DD;
+  --texto: #111B21;
+  --hora: #8696A0;
+  --rojo-yoyo: #C0392B;
+  --sombra: 0 1px 1px rgba(11,20,26,.13);
+}
+
+body {
+  background-color: #0b141a;
+  overflow: hidden;
+}
+
+/* Fondo con patrón de puntos estilo WhatsApp */
+.bg-patron {
+  background-color: var(--fondo-chat);
+  background-image: radial-gradient(rgba(0,0,0,.035) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* Animación de los 3 puntos (Typing) */
+.dots span {
+  animation: blink 1.2s infinite ease-in-out both;
+}
+.dots span:nth-child(2) { animation-delay: .2s; }
+.dots span:nth-child(3) { animation-delay: .4s; }
+
+@keyframes blink { 
+  0%, 80%, 100% { opacity: .25; transform: translateY(0); } 
+  40% { opacity: 1; transform: translateY(-2px); } 
+}
+
+/* Animación del micrófono escuchando */
+.mic-escuchando {
+  background-color: var(--rojo-yoyo) !important;
+  animation: pulso 1.2s infinite;
+}
+
+@keyframes pulso {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(192,57,43,.5); }
+  50%      { box-shadow: 0 0 0 9px rgba(192,57,43,0); }
+}
