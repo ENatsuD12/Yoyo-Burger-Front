@@ -1,4 +1,4 @@
-import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit } from '@angular/core';
+import { ChangeDetectorRef, Component, ElementRef, ViewChild, AfterViewChecked, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { environment } from '../environments/environment';
@@ -19,6 +19,13 @@ interface Mensaje {
 })
 export class App implements OnInit, AfterViewChecked {
   @ViewChild('messagesContainer') private messagesContainer!: ElementRef;
+
+  // zone.js no instrumenta fetch()+ReadableStream.getReader() (el parche
+  // zone-patch-fetch solo cubre la promesa inicial de fetch, no las
+  // iteraciones del reader) — sin este forzado manual, el mensaje del bot
+  // solo aparecía al recargar la página o al disparar otro evento que sí
+  // pasara por Angular (ej. escribir en el input).
+  private readonly cdr = inject(ChangeDetectorRef);
 
   // Estado de sesión
   isLogin = true;
@@ -200,6 +207,11 @@ export class App implements OnInit, AfterViewChecked {
               this.textoStreaming = '';
             }
           } catch (e) {}
+
+          // Cada evento SSE llega fuera de la zona de Angular (ver comentario
+          // en la declaración de `cdr`) — sin esto, el cambio de estado queda
+          // aplicado en memoria pero invisible hasta el próximo repintado.
+          this.cdr.markForCheck();
         }
       }
     } catch (err) {
@@ -210,6 +222,7 @@ export class App implements OnInit, AfterViewChecked {
       this.bloquearInput = false;
       this.estadoBot = 'en línea';
       this.textoStreaming = '';
+      this.cdr.markForCheck();
     }
   }
 
@@ -263,6 +276,9 @@ export class App implements OnInit, AfterViewChecked {
       this.reconocedor = new Reconocimiento();
       this.reconocedor.lang = 'es-MX';
       this.reconocedor.interimResults = true;
+      // onresult/onerror/onend son callbacks nativos del Web Speech API,
+      // asignados por propiedad (no addEventListener) — tampoco los cubre
+      // zone.js, mismo motivo que el fetch/ReadableStream de arriba.
       this.reconocedor.onresult = (e: any) => {
         let texto = '';
         for (let i = 0; i < e.results.length; i++) texto += e.results[i][0].transcript;
@@ -271,9 +287,10 @@ export class App implements OnInit, AfterViewChecked {
           this.toggleVoz();
           this.enviarMensaje();
         }
+        this.cdr.markForCheck();
       };
-      this.reconocedor.onerror = () => this.escuchando = false;
-      this.reconocedor.onend = () => this.escuchando = false;
+      this.reconocedor.onerror = () => { this.escuchando = false; this.cdr.markForCheck(); };
+      this.reconocedor.onend = () => { this.escuchando = false; this.cdr.markForCheck(); };
     }
   }
 
