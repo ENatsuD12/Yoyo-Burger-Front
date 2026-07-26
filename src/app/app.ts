@@ -1,6 +1,7 @@
 import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { environment } from '../environments/environment';
 
 interface Mensaje {
   tipo: 'burbuja' | 'sistema';
@@ -36,8 +37,9 @@ export class App implements OnInit, AfterViewChecked {
   escuchando = false;
   reconocedor: any;
 
-  // URL del backend (Ajusta esto a tu servidor real)
-  readonly URL_STREAM = 'https://tu-backend-api.com/chat/stream'; 
+  // URL del backend: viene de environment.ts (prod, dominio fijo de Ngrok) o
+  // environment.development.ts (dev, localhost:8000) — nunca hardcodeada aquí.
+  readonly URL_STREAM = `${environment.apiUrl}/chat/stream`;
   readonly MAX_TEXTO = 250;
 
   ngOnInit() {
@@ -143,7 +145,12 @@ export class App implements OnInit, AfterViewChecked {
     try {
       const res = await fetch(this.URL_STREAM, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // Sin esto, el free tier de Ngrok intercepta la petición con su
+          // página HTML de advertencia en vez de dejarla llegar al backend.
+          'ngrok-skip-browser-warning': 'true',
+        },
         body: JSON.stringify({ telefono: this.sesion.telefono, nombre: this.sesion.nombre, mensaje: texto }),
       });
 
@@ -152,6 +159,10 @@ export class App implements OnInit, AfterViewChecked {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      // El backend siempre manda "fin" justo después de "error": sin este
+      // guard, el "fin" empujaría una segunda burbuja "(Sin respuesta)"
+      // duplicando el mensaje de error que ya se mostró.
+      let errorMostrado = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -173,9 +184,19 @@ export class App implements OnInit, AfterViewChecked {
             } else if (ev.tipo === 'token') {
               this.isTyping = false;
               this.textoStreaming += ev.texto;
+            } else if (ev.tipo === 'reset') {
+              // El backend va a reemplazar todo lo acumulado por el resumen final.
+              this.textoStreaming = '';
+            } else if (ev.tipo === 'error') {
+              this.isTyping = false;
+              this.agregarBurbuja(ev.texto || 'Ocurrió un error procesando tu mensaje.', 'in');
+              this.textoStreaming = '';
+              errorMostrado = true;
             } else if (ev.tipo === 'fin') {
-              const botones = this.detectarBotones(this.textoStreaming);
-              this.agregarBurbuja(this.textoStreaming || '(Sin respuesta)', 'in', botones);
+              if (!errorMostrado) {
+                const botones = this.detectarBotones(this.textoStreaming);
+                this.agregarBurbuja(this.textoStreaming || '(Sin respuesta)', 'in', botones);
+              }
               this.textoStreaming = '';
             }
           } catch (e) {}
