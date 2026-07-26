@@ -224,12 +224,37 @@ export class App implements OnInit, AfterViewChecked {
     }
   }
 
+  // Mismos 4 patrones deterministas que yoyo_chat.html (el texto de cierre
+  // siempre lo genera el backend de forma fija, nunca el LLM — ver
+  // yoyo-bot/services/router.ts). Si falta alguno aquí, esa fase de la
+  // conversación se queda sin botones de respuesta rápida.
   private detectarBotones(texto: string) {
-    const t = texto.trim();
+    const t = (texto || '').trim();
     if (t.endsWith('¿Confirmo tu pedido? Responde "sí" para cerrarlo.')) {
-      return [{ texto: 'Sí, confirmar ✅', valor: 'sí', principal: true }, { texto: 'No, esperar', valor: null, guia: 'Dime qué quieres cambiar 😊' }];
+      return [
+        { texto: 'Sí, confirmar ✅', valor: 'sí', principal: true },
+        { texto: 'No, esperar', valor: null, guia: 'Sin problema, tu pedido no se ha cerrado. Dime qué quieres agregar, quitar o cambiar 😊' },
+      ];
     }
-    return null; 
+    if (t.endsWith('¿Así está bien tu pedido, o quieres agregar/quitar algo?')) {
+      return [
+        { texto: 'Sí, está bien', valor: 'sí', principal: true },
+        { texto: 'No, quiero cambiar algo', valor: null, guia: 'Dime qué quieres agregar, quitar o cambiar 😊' },
+      ];
+    }
+    if (t.endsWith('¿Deseas agregar algo más, o ya es todo tu pedido? 😊')) {
+      return [
+        { texto: 'Ya es todo', valor: 'ya es todo', principal: true },
+        { texto: 'Quiero agregar más', valor: null, guia: 'Dime qué más quieres agregar, quitar o cambiar 🍔' },
+      ];
+    }
+    if (t.endsWith('Responde "sí" para cancelar o "no" para seguir con tu pedido.')) {
+      return [
+        { texto: 'Sí, cancelar ❌', valor: 'sí', principal: true },
+        { texto: 'No, continuar con mi pedido', valor: 'no' },
+      ];
+    }
+    return null;
   }
 
   private inicializarReconocimientoVoz() {
