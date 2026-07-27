@@ -4,6 +4,8 @@ import { FormsModule } from '@angular/forms';
 import { environment } from '../environments/environment';
 import { esNumeroWhatsAppValido } from '../shared/validacionTelefono';
 
+const FORMATO_PIN = /^\d{4}$/;
+
 interface Mensaje {
   tipo: 'burbuja' | 'sistema';
   texto: string;
@@ -30,8 +32,9 @@ export class App implements OnInit, AfterViewChecked {
 
   // Estado de sesión
   isLogin = true;
-  sesion = { nombre: '', telefono: '' };
+  sesion = { nombre: '', telefono: '', pin: '' };
   errorLogin = '';
+  verificandoLogin = false;
   
   // Estado del chat
   mensajes: Mensaje[] = [];
@@ -50,6 +53,14 @@ export class App implements OnInit, AfterViewChecked {
   readonly URL_STREAM = `${environment.apiUrl}/chat/stream`;
   readonly MAX_TEXTO = 250;
 
+  // El backend borra el historial de un teléfono tras 24h de inactividad
+  // (ver memory/history.ts::necesitaLimpieza en yoyo-bot). El caché local en
+  // localStorage no tenía ningún límite de tiempo propio: en un equipo
+  // compartido, el historial de pedidos de un cliente podía quedar legible
+  // ahí indefinidamente, mucho más allá de lo que el propio backend
+  // considera "la misma sesión". Se replica la misma ventana de 24h aquí.
+  private readonly UN_DIA_MS = 24 * 60 * 60 * 1000;
+
   ngOnInit() {
     this.inicializarReconocimientoVoz();
     this.restaurarSesion();
@@ -61,9 +72,14 @@ export class App implements OnInit, AfterViewChecked {
 
   // --- CONTROL DE SESIÓN ---
 
-  entrarChat() {
+  // El teléfono por sí solo no prueba nada: cualquiera que lo teclee podía
+  // antes leer y continuar el pedido de otra persona. El PIN se verifica (o
+  // se crea, si es la primera vez que se usa ese teléfono) contra el
+  // backend ANTES de mostrar el chat — así el error se ve de inmediato en el
+  // login, en vez de hasta el primer mensaje.
+  async entrarChat() {
     const tel = this.sesion.telefono.replace(/\D+/g, '');
-    
+
     if (!this.sesion.nombre || !/^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s'-]+$/.test(this.sesion.nombre)) {
       this.errorLogin = 'El nombre es inválido.'; return;
     }
@@ -74,36 +90,75 @@ export class App implements OnInit, AfterViewChecked {
     if (tel[0] === '0' || !esNumeroWhatsAppValido(tel)) {
       this.errorLogin = 'Teléfono inválido. Debe ser de 10 dígitos y válido.'; return;
     }
+    if (!FORMATO_PIN.test(this.sesion.pin)) {
+      this.errorLogin = 'El PIN debe ser de exactamente 4 dígitos.'; return;
+    }
 
-    this.sesion.telefono = tel;
-    localStorage.setItem('yoyo-sesion', JSON.stringify(this.sesion));
-    this.cargarHistorial();
-    this.isLogin = false;
+    this.errorLogin = '';
+    this.verificandoLogin = true;
+    try {
+      const res = await fetch(`${environment.apiUrl}/sesion`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
+        body: JSON.stringify({ telefono: tel, pin: this.sesion.pin }),
+      });
+      const datos = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        this.errorLogin = datos.error || 'No se pudo iniciar sesión. Intenta de nuevo.';
+        return;
+      }
+
+      this.sesion.telefono = tel;
+      localStorage.setItem('yoyo-sesion', JSON.stringify(this.sesion));
+      this.cargarHistorial();
+      this.isLogin = false;
+    } catch {
+      this.errorLogin = 'No se pudo conectar con el servidor. Intenta de nuevo.';
+    } finally {
+      this.verificandoLogin = false;
+    }
   }
 
   salirChat() {
     localStorage.removeItem('yoyo-sesion');
     this.isLogin = true;
     this.mensajes = [];
-    this.sesion = { nombre: '', telefono: '' };
+    this.sesion = { nombre: '', telefono: '', pin: '' };
   }
 
   private restaurarSesion() {
     const raw = localStorage.getItem('yoyo-sesion');
-    if (raw) {
-      this.sesion = JSON.parse(raw);
-      this.cargarHistorial();
-      this.isLogin = false;
+    if (!raw) return;
+    const sesionGuardada = JSON.parse(raw);
+    // Sesiones guardadas antes de agregar el PIN no lo traen: forzar login
+    // de nuevo en vez de entrar directo a un chat que va a rechazar cada
+    // mensaje por falta de PIN.
+    if (!FORMATO_PIN.test(sesionGuardada?.pin ?? '')) {
+      localStorage.removeItem('yoyo-sesion');
+      return;
     }
+    this.sesion = sesionGuardada;
+    this.cargarHistorial();
+    this.isLogin = false;
   }
 
   // --- HISTORIAL Y MENSAJES ---
 
   private cargarHistorial() {
-    const raw = localStorage.getItem(`yoyo-msgs-${this.sesion.telefono}`);
-    if (raw) {
-      this.mensajes = JSON.parse(raw);
+    const clave = `yoyo-msgs-${this.sesion.telefono}`;
+    const raw = localStorage.getItem(clave);
+    const cache = raw ? JSON.parse(raw) : null;
+
+    // Formato viejo (array plano, sin marca de tiempo) o caché vencido por
+    // inactividad >24h: se descarta y se arranca en limpio, igual que ya
+    // hace el backend con el historial de Supabase.
+    const vigente = cache && typeof cache.ultimaActividad === 'number'
+      && (Date.now() - cache.ultimaActividad) <= this.UN_DIA_MS;
+
+    if (vigente) {
+      this.mensajes = cache.mensajes;
     } else {
+      if (raw) localStorage.removeItem(clave);
       this.agregarSistema(`Chat de ${this.sesion.nombre} · ${this.sesion.telefono}`);
       this.agregarBurbuja(`¡Hola, ${this.sesion.nombre}! 🍔 Soy el asistente de Yoyo Burger. Dime qué se te antoja.`, 'in');
     }
@@ -111,7 +166,8 @@ export class App implements OnInit, AfterViewChecked {
 
   private guardarHistorial() {
     if (this.mensajes.length > 100) this.mensajes = this.mensajes.slice(-100);
-    localStorage.setItem(`yoyo-msgs-${this.sesion.telefono}`, JSON.stringify(this.mensajes));
+    const cache = { ultimaActividad: Date.now(), mensajes: this.mensajes };
+    localStorage.setItem(`yoyo-msgs-${this.sesion.telefono}`, JSON.stringify(cache));
   }
 
   private agregarBurbuja(texto: string, lado: 'in' | 'out', botones: any[] | null = null) {
@@ -163,10 +219,28 @@ export class App implements OnInit, AfterViewChecked {
           // página HTML de advertencia en vez de dejarla llegar al backend.
           'ngrok-skip-browser-warning': 'true',
         },
-        body: JSON.stringify({ telefono: this.sesion.telefono, nombre: this.sesion.nombre, mensaje: texto }),
+        body: JSON.stringify({ telefono: this.sesion.telefono, nombre: this.sesion.nombre, mensaje: texto, pin: this.sesion.pin }),
       });
 
-      if (!res.ok || !res.body) throw new Error('Error en el servidor');
+      if (!res.ok) {
+        // El backend rechaza ANTES de abrir el stream (ej. PIN bloqueado por
+        // demasiados intentos fallidos desde otro lado, o Supabase caído
+        // justo en este turno) — no es un error de red genérico, así que se
+        // muestra el motivo real en vez de "error conectando con el bot".
+        const datos = await res.json().catch(() => ({}));
+        const mensajeError = datos.error || 'Ocurrió un error procesando tu mensaje.';
+        if (res.status === 401) {
+          // El PIN ya no es válido para seguir: forzar a iniciar sesión de
+          // nuevo (mostrando el motivo ahí) en vez de dejar al cliente
+          // escribiendo mensajes que van a seguir rechazándose uno por uno.
+          this.salirChat();
+          this.errorLogin = mensajeError;
+        } else {
+          this.agregarBurbuja(mensajeError, 'in');
+        }
+        return;
+      }
+      if (!res.body) throw new Error('Error en el servidor');
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
