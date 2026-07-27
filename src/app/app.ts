@@ -2,6 +2,7 @@ import { ChangeDetectorRef, Component, ElementRef, ViewChild, AfterViewChecked, 
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { environment } from '../environments/environment';
+import { esNumeroWhatsAppValido } from '../shared/validacionTelefono';
 
 interface Mensaje {
   tipo: 'burbuja' | 'sistema';
@@ -66,7 +67,11 @@ export class App implements OnInit, AfterViewChecked {
     if (!this.sesion.nombre || !/^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s'-]+$/.test(this.sesion.nombre)) {
       this.errorLogin = 'El nombre es inválido.'; return;
     }
-    if (!/^\d{10}$/.test(tel) || tel[0] === '0' || /^(\d)\1{9}$/.test(tel)) {
+    // esNumeroWhatsAppValido viene de shared/validacionTelefono.ts, la misma
+    // función que usa el backend — ya no hay dos regex que puedan divergir
+    // (pasó el 2026-07-26: este login dejaba entrar "9999999990" y el
+    // backend lo bloqueaba después con "[SEGURIDAD] Número inválido").
+    if (tel[0] === '0' || !esNumeroWhatsAppValido(tel)) {
       this.errorLogin = 'Teléfono inválido. Debe ser de 10 dígitos y válido.'; return;
     }
 
