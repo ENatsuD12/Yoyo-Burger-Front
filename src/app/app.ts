@@ -116,6 +116,11 @@ export class App implements OnInit, AfterViewChecked {
       this.errorLogin = 'No se pudo conectar con el servidor. Intenta de nuevo.';
     } finally {
       this.verificandoLogin = false;
+      // Mismo motivo que en enviarMensaje(): el estado ya queda correcto tras
+      // el await (por eso recargar la página sí mostraba el chat), pero sin
+      // esto la vista no se repinta para reflejarlo — se queda mostrando el
+      // login aunque isLogin ya sea false en memoria.
+      this.cdr.markForCheck();
     }
   }
 
