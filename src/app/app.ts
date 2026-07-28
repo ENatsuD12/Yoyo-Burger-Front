@@ -3,8 +3,13 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { environment } from '../environments/environment';
 import { esNumeroWhatsAppValido } from '../shared/validacionTelefono';
+import { SesionService, type Sesion, type PedidoHistorialItem } from './sesion.service';
 
-const FORMATO_PIN = /^\d{4}$/;
+// 6 dígitos para teléfonos nuevos; 4 solo se acepta para no dejar fuera a
+// quien ya tenía un PIN creado antes de esta migración (ver
+// yoyo-bot/security/pin.ts) — el backend es quien decide cuál exigir según
+// si el teléfono es nuevo o no.
+const FORMATO_PIN = /^(\d{4}|\d{6})$/;
 
 interface Mensaje {
   tipo: 'burbuja' | 'sistema';
@@ -29,10 +34,17 @@ export class App implements OnInit, AfterViewChecked {
   // solo aparecía al recargar la página o al disparar otro evento que sí
   // pasara por Angular (ej. escribir en el input).
   private readonly cdr = inject(ChangeDetectorRef);
+  private readonly sesionSvc = inject(SesionService);
 
   // Estado de sesión
   isLogin = true;
-  sesion = { nombre: '', telefono: '', pin: '' };
+  /** Paso actual del login (ver yoyo-bot/main.ts: /sesion y /validar-pin
+   * están separados a propósito para no filtrar si un teléfono ya existe
+   * antes de validar el PIN — "phone enumeration"). 'nombre' solo aparece
+   * si el backend dice que hace falta, o si este dispositivo no tiene el
+   * nombre de este teléfono cacheado localmente (el backend no lo guarda). */
+  pantallaLogin: 'telefono' | 'pin' | 'nombre' = 'telefono';
+  sesion: Sesion = { nombre: '', telefono: '', pin: '', token: '' };
   errorLogin = '';
   verificandoLogin = false;
   
@@ -48,8 +60,22 @@ export class App implements OnInit, AfterViewChecked {
   escuchando = false;
   reconocedor: any;
 
-  // URL del backend: viene de environment.ts (prod, dominio fijo de Ngrok) o
-  // environment.development.ts (dev, localhost:8000) — nunca hardcodeada aquí.
+  // "Mis Pedidos": historial de folios como comprobante de compra
+  // puramente digital (sin SMS/WhatsApp, ver yoyo-bot/db/pedidos.ts).
+  mostrarHistorial = false;
+  cargandoHistorial = false;
+  errorHistorial = '';
+  historialPedidos: PedidoHistorialItem[] = [];
+  /** Folio en proceso de cancelación (null si ninguno) — deshabilita el
+   * botón de esa fila mientras la petición está en vuelo. */
+  cancelandoFolio: string | null = null;
+  /** Separado de errorHistorial a propósito: un fallo al cancelar no debe
+   * reemplazar la lista completa de pedidos por un mensaje de error. */
+  errorCancelacion = '';
+
+  // URL del backend: viene de environment.ts (prod, dominio del túnel de
+  // Cloudflare) o environment.development.ts (dev, localhost:8000) — nunca
+  // hardcodeada aquí.
   readonly URL_STREAM = `${environment.apiUrl}/chat/stream`;
   readonly MAX_TEXTO = 250;
 
@@ -71,18 +97,17 @@ export class App implements OnInit, AfterViewChecked {
   }
 
   // --- CONTROL DE SESIÓN ---
+  //
+  // Login en dos llamadas separadas al backend, a propósito (ver
+  // yoyo-bot/main.ts): /sesion (solo teléfono) siempre responde igual,
+  // exista o no el número, así que aquí SIEMPRE se avanza a la pantalla de
+  // PIN sin importar nada más — no hay "esNuevo" que leer todavía. Solo
+  // /validar-pin (paso 2) puede revelar si el teléfono era nuevo
+  // (requireProfileCompletion), y solo DESPUÉS de que el PIN ya fue correcto.
 
-  // El teléfono por sí solo no prueba nada: cualquiera que lo teclee podía
-  // antes leer y continuar el pedido de otra persona. El PIN se verifica (o
-  // se crea, si es la primera vez que se usa ese teléfono) contra el
-  // backend ANTES de mostrar el chat — así el error se ve de inmediato en el
-  // login, en vez de hasta el primer mensaje.
-  async entrarChat() {
+  /** Paso 1: solo teléfono. */
+  async enviarTelefono() {
     const tel = this.sesion.telefono.replace(/\D+/g, '');
-
-    if (!this.sesion.nombre || !/^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s'-]+$/.test(this.sesion.nombre)) {
-      this.errorLogin = 'El nombre es inválido.'; return;
-    }
     // esNumeroWhatsAppValido viene de shared/validacionTelefono.ts, la misma
     // función que usa el backend — ya no hay dos regex que puedan divergir
     // (pasó el 2026-07-26: este login dejaba entrar "9999999990" y el
@@ -90,45 +115,171 @@ export class App implements OnInit, AfterViewChecked {
     if (tel[0] === '0' || !esNumeroWhatsAppValido(tel)) {
       this.errorLogin = 'Teléfono inválido. Debe ser de 10 dígitos y válido.'; return;
     }
+
+    this.errorLogin = '';
+    this.verificandoLogin = true;
+    try {
+      const resultado = await this.sesionSvc.iniciarSesion(tel);
+      if (!resultado.ok) {
+        this.errorLogin = resultado.error || 'No se pudo continuar. Intenta de nuevo.';
+        return;
+      }
+      this.sesion.telefono = tel;
+      this.pantallaLogin = 'pin';
+    } finally {
+      this.verificandoLogin = false;
+      this.cdr.markForCheck();
+    }
+  }
+
+  /** Paso 2: PIN. Solo aquí se sabe si era correcto, y solo aquí el backend
+   * revela si el teléfono era nuevo. */
+  async confirmarPin() {
     if (!FORMATO_PIN.test(this.sesion.pin)) {
-      this.errorLogin = 'El PIN debe ser de exactamente 4 dígitos.'; return;
+      this.errorLogin = 'El PIN debe tener 6 dígitos (o 4, si ya tenías uno creado antes).'; return;
     }
 
     this.errorLogin = '';
     this.verificandoLogin = true;
     try {
-      const res = await fetch(`${environment.apiUrl}/sesion`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
-        body: JSON.stringify({ telefono: tel, pin: this.sesion.pin }),
-      });
-      const datos = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        this.errorLogin = datos.error || 'No se pudo iniciar sesión. Intenta de nuevo.';
+      const resultado = await this.sesionSvc.validarPin(this.sesion.telefono, this.sesion.pin);
+      if (!resultado.ok) {
+        this.errorLogin = resultado.error || 'No se pudo iniciar sesión. Intenta de nuevo.';
         return;
       }
+      this.sesion.token = resultado.token ?? '';
 
-      this.sesion.telefono = tel;
-      localStorage.setItem('yoyo-sesion', JSON.stringify(this.sesion));
-      this.cargarHistorial();
-      this.isLogin = false;
-    } catch {
-      this.errorLogin = 'No se pudo conectar con el servidor. Intenta de nuevo.';
+      // El backend NO guarda el nombre (services/autenticacion.ts solo
+      // persiste telefono+pin_hash, ver db/clientes.ts) — si este teléfono
+      // ya tenía cuenta pero este es un dispositivo nuevo sin caché local,
+      // tampoco hay nombre que usar aunque requireProfileCompletion sea
+      // false. En ese caso también hay que pedirlo.
+      const nombreCacheado = this.nombreCacheadoPara(this.sesion.telefono);
+      if (resultado.requireProfileCompletion || !nombreCacheado) {
+        this.pantallaLogin = 'nombre';
+        return;
+      }
+      this.sesion.nombre = nombreCacheado;
+      this.completarLogin();
     } finally {
       this.verificandoLogin = false;
-      // Mismo motivo que en enviarMensaje(): el estado ya queda correcto tras
-      // el await (por eso recargar la página sí mostraba el chat), pero sin
-      // esto la vista no se repinta para reflejarlo — se queda mostrando el
-      // login aunque isLogin ya sea false en memoria.
       this.cdr.markForCheck();
     }
+  }
+
+  /** Paso 3 (solo si aplica): nombre. */
+  confirmarNombre() {
+    if (!this.sesion.nombre || !/^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s'-]+$/.test(this.sesion.nombre)) {
+      this.errorLogin = 'El nombre es inválido.'; return;
+    }
+    this.errorLogin = '';
+    this.completarLogin();
+  }
+
+  /** Regresa a la pantalla de teléfono, ej. si el cliente se equivocó al
+   * teclearlo — no hace falta perder todo el login por corregir un dígito. */
+  volverATelefono() {
+    this.errorLogin = '';
+    this.sesion.pin = '';
+    this.pantallaLogin = 'telefono';
+  }
+
+  private nombreCacheadoPara(telefono: string): string | null {
+    const raw = localStorage.getItem('yoyo-sesion');
+    if (!raw) return null;
+    try {
+      const cache = JSON.parse(raw);
+      return cache?.telefono === telefono && cache?.nombre ? cache.nombre : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private completarLogin() {
+    localStorage.setItem('yoyo-sesion', JSON.stringify(this.sesion));
+    this.cargarHistorial();
+    this.isLogin = false;
   }
 
   salirChat() {
     localStorage.removeItem('yoyo-sesion');
     this.isLogin = true;
+    this.pantallaLogin = 'telefono';
     this.mensajes = [];
-    this.sesion = { nombre: '', telefono: '', pin: '' };
+    this.sesion = { nombre: '', telefono: '', pin: '', token: '' };
+  }
+
+  // --- MIS PEDIDOS (historial de folios) ---
+
+  async abrirHistorial() {
+    this.mostrarHistorial = true;
+    this.cargandoHistorial = true;
+    this.errorHistorial = '';
+    try {
+      const resultado = await this.sesionSvc.obtenerHistorial(this.sesion, (token) => {
+        this.sesion.token = token;
+        localStorage.setItem('yoyo-sesion', JSON.stringify(this.sesion));
+      });
+      if (!resultado.ok) {
+        if (resultado.sesionExpirada) {
+          this.mostrarHistorial = false;
+          this.salirChat();
+          this.errorLogin = resultado.error || 'Tu sesión ya no es válida. Inicia sesión de nuevo.';
+          return;
+        }
+        this.errorHistorial = resultado.error || 'No se pudo cargar tu historial.';
+        return;
+      }
+      this.historialPedidos = resultado.pedidos ?? [];
+    } finally {
+      this.cargandoHistorial = false;
+      this.cdr.markForCheck();
+    }
+  }
+
+  cerrarHistorial() {
+    this.mostrarHistorial = false;
+  }
+
+  // Cancelación estrictamente visual (ver PASO 3/4 del rediseño): este botón
+  // llama directo al backend, nunca pasa por el LLM — un modelo pequeño
+  // manejando cancelaciones de pedidos pasados es justo el tipo de decisión
+  // que este proyecto nunca le confía a la IA (ver ai/prompts.ts).
+  async cancelarPedido(pedido: PedidoHistorialItem) {
+    if (pedido.estado !== 'recibido' || this.cancelandoFolio) return;
+    if (!confirm(`¿Cancelar el pedido ${pedido.folio}? Esta acción no se puede deshacer.`)) return;
+
+    this.cancelandoFolio = pedido.folio;
+    this.errorCancelacion = '';
+    try {
+      const { res, sesionExpirada, mensajeError } = await this.sesionSvc.fetchConSesion(
+        `${environment.apiUrl}/cancelar-pedido`,
+        { telefono: this.sesion.telefono, folio: pedido.folio },
+        this.sesion,
+        (token) => {
+          this.sesion.token = token;
+          localStorage.setItem('yoyo-sesion', JSON.stringify(this.sesion));
+        },
+      );
+
+      if (sesionExpirada) {
+        this.mostrarHistorial = false;
+        this.salirChat();
+        this.errorLogin = mensajeError || 'Tu sesión ya no es válida. Inicia sesión de nuevo.';
+        return;
+      }
+      if (!res.ok) {
+        const datos = await res.json().catch(() => ({}));
+        this.errorCancelacion = mensajeError || datos.error || 'No se pudo cancelar el pedido.';
+        return;
+      }
+      // Éxito: se refleja de inmediato en la lista ya cargada, sin tener que
+      // volver a pedir el historial completo.
+      pedido.estado = 'cancelado';
+    } finally {
+      this.cancelandoFolio = null;
+      this.cdr.markForCheck();
+    }
   }
 
   private restaurarSesion() {
@@ -142,9 +293,25 @@ export class App implements OnInit, AfterViewChecked {
       localStorage.removeItem('yoyo-sesion');
       return;
     }
-    this.sesion = sesionGuardada;
+    this.sesion = { token: '', ...sesionGuardada };
     this.cargarHistorial();
     this.isLogin = false;
+
+    // Sesiones guardadas antes de agregar el token de sesión (o cerradas por
+    // más de 15 min) no traen uno vigente. En vez de esperar a que el primer
+    // mensaje choque con un 401 y solo AHÍ pedir el refresh, se renueva aquí
+    // en segundo plano llamando a /validar-pin con el PIN que ya está
+    // guardado — el cliente entra directo al chat sin ver ningún error de
+    // por medio.
+    if (!this.sesion.token) {
+      this.sesionSvc.validarPin(this.sesion.telefono, this.sesion.pin).then((r) => {
+        if (r.ok && r.token) {
+          this.sesion.token = r.token;
+          localStorage.setItem('yoyo-sesion', JSON.stringify(this.sesion));
+        }
+        this.cdr.markForCheck();
+      });
+    }
   }
 
   // --- HISTORIAL Y MENSAJES ---
@@ -216,32 +383,39 @@ export class App implements OnInit, AfterViewChecked {
     this.estadoBot = 'conectando...';
 
     try {
-      const res = await fetch(this.URL_STREAM, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          // Sin esto, el free tier de Ngrok intercepta la petición con su
-          // página HTML de advertencia en vez de dejarla llegar al backend.
-          'ngrok-skip-browser-warning': 'true',
+      // fetchConSesion manda el token en vez del PIN, y si el backend dice
+      // que venció (tokenExpirado, no que sea inválido) lo renueva solo con
+      // el PIN que ya está guardado y reintenta — esta llamada nunca ve esa
+      // renovación, solo el resultado final ya reintentado si hizo falta.
+      const { res, sesionExpirada, mensajeError: mensajeRechazo } = await this.sesionSvc.fetchConSesion(
+        this.URL_STREAM,
+        { telefono: this.sesion.telefono, nombre: this.sesion.nombre, mensaje: texto },
+        this.sesion,
+        (token) => {
+          this.sesion.token = token;
+          localStorage.setItem('yoyo-sesion', JSON.stringify(this.sesion));
         },
-        body: JSON.stringify({ telefono: this.sesion.telefono, nombre: this.sesion.nombre, mensaje: texto, pin: this.sesion.pin }),
-      });
+      );
 
       if (!res.ok) {
-        // El backend rechaza ANTES de abrir el stream (ej. PIN bloqueado por
-        // demasiados intentos fallidos desde otro lado, o Supabase caído
-        // justo en este turno) — no es un error de red genérico, así que se
-        // muestra el motivo real en vez de "error conectando con el bot".
-        const datos = await res.json().catch(() => ({}));
-        const mensajeError = datos.error || 'Ocurrió un error procesando tu mensaje.';
-        if (res.status === 401) {
-          // El PIN ya no es válido para seguir: forzar a iniciar sesión de
-          // nuevo (mostrando el motivo ahí) en vez de dejar al cliente
+        // El backend rechaza ANTES de abrir el stream (ej. cuenta bloqueada
+        // por demasiados intentos fallidos desde otro lado, rate limit, o
+        // Supabase caído justo en este turno) — no es un error de red
+        // genérico, así que se muestra el motivo real en vez de "error
+        // conectando con el bot".
+        if (sesionExpirada) {
+          // El token ya no sirve y el refresco silencioso tampoco resolvió
+          // (PIN cambiado en otro lado, cuenta bloqueada, token forjado):
+          // forzar a iniciar sesión de nuevo en vez de dejar al cliente
           // escribiendo mensajes que van a seguir rechazándose uno por uno.
           this.salirChat();
-          this.errorLogin = mensajeError;
+          this.errorLogin = mensajeRechazo || 'Tu sesión ya no es válida. Inicia sesión de nuevo.';
+        } else if (mensajeRechazo) {
+          // 429 (rate limit): no cierra la sesión, solo pide esperar.
+          this.agregarBurbuja(mensajeRechazo, 'in');
         } else {
-          this.agregarBurbuja(mensajeError, 'in');
+          const datos = await res.json().catch(() => ({}));
+          this.agregarBurbuja(datos.error || 'Ocurrió un error procesando tu mensaje.', 'in');
         }
         return;
       }

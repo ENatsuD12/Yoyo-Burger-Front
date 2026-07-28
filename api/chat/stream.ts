@@ -23,14 +23,18 @@ export default async function handler(request: Request): Promise<Response> {
   }
 
   const ipCliente = request.headers.get('x-forwarded-for') ?? '';
+  // El token de sesión viaja en este header (ver main.ts::requerirSesion) —
+  // sin reenviarlo, cada llamada a /chat/stream se rechazaría con 401 pese a
+  // que el cliente sí lo mandó.
+  const authorization = request.headers.get('authorization') ?? '';
 
   const body = await request.text();
   const backendRes = await fetch(`${backendUrl}/chat/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'ngrok-skip-browser-warning': 'true',
       ...(ipCliente ? { 'x-forwarded-for': ipCliente } : {}),
+      ...(authorization ? { 'authorization': authorization } : {}),
     },
     body,
   });
