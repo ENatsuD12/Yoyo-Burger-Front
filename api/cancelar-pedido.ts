@@ -21,6 +21,7 @@ export default async function handler(request: Request): Promise<Response> {
 
   const ipCliente = request.headers.get('x-forwarded-for') ?? '';
   const authorization = request.headers.get('authorization') ?? '';
+  const origin = request.headers.get('origin') ?? '';
 
   const body = await request.text();
   const backendRes = await fetch(`${backendUrl}/cancelar-pedido`, {
@@ -29,6 +30,7 @@ export default async function handler(request: Request): Promise<Response> {
       'Content-Type': 'application/json',
       ...(ipCliente ? { 'x-forwarded-for': ipCliente } : {}),
       ...(authorization ? { 'authorization': authorization } : {}),
+      ...(origin ? { 'origin': origin } : {}),
     },
     body,
   });

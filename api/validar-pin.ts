@@ -30,6 +30,7 @@ export default async function handler(request: Request): Promise<Response> {
   // rate limiting por IP (ver main.ts::obtenerIpCliente) quedaría compartido
   // entre clientes distintos en vez de aislado por persona.
   const ipCliente = request.headers.get('x-forwarded-for') ?? '';
+  const origin = request.headers.get('origin') ?? '';
 
   const body = await request.text();
   const backendRes = await fetch(`${backendUrl}/validar-pin`, {
@@ -37,6 +38,7 @@ export default async function handler(request: Request): Promise<Response> {
     headers: {
       'Content-Type': 'application/json',
       ...(ipCliente ? { 'x-forwarded-for': ipCliente } : {}),
+      ...(origin ? { 'origin': origin } : {}),
     },
     body,
   });

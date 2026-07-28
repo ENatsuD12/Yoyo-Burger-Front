@@ -34,6 +34,7 @@ export default async function handler(request: Request): Promise<Response> {
   // entre clientes distintos en vez de aislado por persona.
   const ipCliente = request.headers.get('x-forwarded-for') ?? '';
   const authorization = request.headers.get('authorization') ?? '';
+  const origin = request.headers.get('origin') ?? '';
 
   const url = new URL(request.url);
   const backendRes = await fetch(`${backendUrl}/mis-pedidos${url.search}`, {
@@ -41,6 +42,7 @@ export default async function handler(request: Request): Promise<Response> {
     headers: {
       ...(ipCliente ? { 'x-forwarded-for': ipCliente } : {}),
       ...(authorization ? { 'authorization': authorization } : {}),
+      ...(origin ? { 'origin': origin } : {}),
     },
   });
 

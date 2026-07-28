@@ -1,6 +1,6 @@
 // Proxy serverless (Vercel Edge Function) hacia POST /sesion del backend.
 //
-// Objetivo: la URL real del backend (túnel Ngrok) nunca llega al bundle JS
+// Objetivo: la URL real del backend (túnel Cloudflare) nunca llega al bundle JS
 // del cliente — vive solo en BACKEND_URL, una env var de servidor (sin
 // prefijo público de Angular), configurada en el proyecto de Vercel. El
 // front en producción llama a /api/sesion (mismo origen) en vez de la URL
@@ -29,14 +29,18 @@ export default async function handler(request: Request): Promise<Response> {
   // rate limiting por IP (ver main.ts::obtenerIpCliente) quedaría compartido
   // entre clientes distintos en vez de aislado por persona.
   const ipCliente = request.headers.get('x-forwarded-for') ?? '';
+  // El backend valida el header Origin en rutas de negocio. Las Edge Functions
+  // hacen fetch saliente sin Origin por defecto, así que lo reenviamos tal cual
+  // viene del navegador para que la protección CORS/ORIGEN del backend pase.
+  const origin = request.headers.get('origin') ?? '';
 
   const body = await request.text();
   const backendRes = await fetch(`${backendUrl}/sesion`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'ngrok-skip-browser-warning': 'true',
       ...(ipCliente ? { 'x-forwarded-for': ipCliente } : {}),
+      ...(origin ? { 'origin': origin } : {}),
     },
     body,
   });
