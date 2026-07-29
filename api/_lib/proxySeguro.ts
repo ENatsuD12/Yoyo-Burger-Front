@@ -45,11 +45,17 @@ export function rechazarOrigenFalso(request: Request): Response | null {
  *    IP del backend (ver yoyo-bot/main.ts::obtenerIpCliente) siga aislado
  *    por persona en vez de ver siempre la IP de Vercel.
  *  - Authorization: el token de sesión, si la petición trae uno.
+ *  - x-api-key: candado M2M (ver yoyo-bot/main.ts::apiKeyValida) — sin este
+ *    secreto, alguien que descubra la URL del túnel Cloudflare y falsifique
+ *    el Origin igual no pasa del backend. Vive SOLO en la env var de
+ *    servidor de Vercel (BACKEND_API_TOKEN), nunca llega al bundle del
+ *    cliente.
  */
 export function headersProxy(request: Request): Headers {
   const headers = new Headers();
   headers.set('Content-Type', 'application/json');
   headers.set('Origin', ORIGEN_FRONTEND);
+  headers.set('x-api-key', process.env['BACKEND_API_TOKEN'] ?? '');
 
   const ip = request.headers.get('x-forwarded-for') ?? request.headers.get('x-real-ip');
   if (ip) headers.set('x-forwarded-for', ip);
