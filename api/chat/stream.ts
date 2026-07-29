@@ -4,6 +4,12 @@
 // ReadableStream de la respuesta SSE del backend token por token — el
 // runtime Node.js de Vercel bufferea la respuesta completa antes de
 // enviarla, lo que rompería el streaming en vivo del chat.
+//
+// Proxy opaco, no tubo ciego: los headers salientes hacia Deno se arman
+// desde cero en api/_lib/proxySeguro.ts (nunca se reenvían los del cliente
+// tal cual, para que un Origin falsificado no llegue nunca al backend).
+import { rechazarOrigenFalso, headersProxy } from '../_lib/proxySeguro';
+
 export const config = { runtime: 'edge' };
 
 export default async function handler(request: Request): Promise<Response> {
@@ -14,6 +20,9 @@ export default async function handler(request: Request): Promise<Response> {
     });
   }
 
+  const origenRechazado = rechazarOrigenFalso(request);
+  if (origenRechazado) return origenRechazado;
+
   const backendUrl = process.env['BACKEND_URL'];
   if (!backendUrl) {
     return new Response(JSON.stringify({ error: 'Backend no configurado.' }), {
@@ -22,20 +31,10 @@ export default async function handler(request: Request): Promise<Response> {
     });
   }
 
-  const ipCliente = request.headers.get('x-forwarded-for') ?? '';
-  // El token de sesión viaja en este header (ver main.ts::requerirSesion) —
-  // sin reenviarlo, cada llamada a /chat/stream se rechazaría con 401 pese a
-  // que el cliente sí lo mandó.
-  const authorization = request.headers.get('authorization') ?? '';
-
   const body = await request.text();
   const backendRes = await fetch(`${backendUrl}/chat/stream`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(ipCliente ? { 'x-forwarded-for': ipCliente } : {}),
-      ...(authorization ? { 'authorization': authorization } : {}),
-    },
+    headers: headersProxy(request),
     body,
   });
 

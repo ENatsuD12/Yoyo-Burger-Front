@@ -5,6 +5,13 @@
 // prefijo público de Angular), configurada en el proyecto de Vercel. El
 // front en producción llama a /api/sesion (mismo origen) en vez de la URL
 // del backend directamente.
+//
+// Esta función es un proxy opaco, no un tubo ciego: nunca reenvía los
+// headers del cliente tal cual (eso permitiría a un atacante falsificar el
+// Origin y hacer que Deno vea una petición "legítima"). Arma un paquete
+// limpio hacia el backend vía api/_lib/proxySeguro.ts.
+import { rechazarOrigenFalso, headersProxy } from './_lib/proxySeguro';
+
 export const config = { runtime: 'edge' };
 
 export default async function handler(request: Request): Promise<Response> {
@@ -15,6 +22,9 @@ export default async function handler(request: Request): Promise<Response> {
     });
   }
 
+  const origenRechazado = rechazarOrigenFalso(request);
+  if (origenRechazado) return origenRechazado;
+
   const backendUrl = process.env['BACKEND_URL'];
   if (!backendUrl) {
     return new Response(JSON.stringify({ error: 'Backend no configurado.' }), {
@@ -23,25 +33,10 @@ export default async function handler(request: Request): Promise<Response> {
     });
   }
 
-  // x-forwarded-for: Vercel la agrega en la petición entrante con la IP real
-  // del cliente. Sin reenviarla explícitamente aquí, el fetch saliente no la
-  // trae — el backend vería la IP de Vercel para todos los usuarios y su
-  // rate limiting por IP (ver main.ts::obtenerIpCliente) quedaría compartido
-  // entre clientes distintos en vez de aislado por persona.
-  const ipCliente = request.headers.get('x-forwarded-for') ?? '';
-  // El backend valida el header Origin en rutas de negocio. Las Edge Functions
-  // hacen fetch saliente sin Origin por defecto, así que lo reenviamos tal cual
-  // viene del navegador para que la protección CORS/ORIGEN del backend pase.
-  const origin = request.headers.get('origin') ?? '';
-
   const body = await request.text();
   const backendRes = await fetch(`${backendUrl}/sesion`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(ipCliente ? { 'x-forwarded-for': ipCliente } : {}),
-      ...(origin ? { 'origin': origin } : {}),
-    },
+    headers: headersProxy(request),
     body,
   });
 

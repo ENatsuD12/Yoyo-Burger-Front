@@ -9,6 +9,12 @@
 // consulta GET: el teléfono viaja en la query string (no es secreto) y el
 // token viaja en el header Authorization (ver main.ts::requerirSesion) — se
 // reenvían la URL (con su ?telefono=...) y ese header tal cual.
+//
+// Proxy opaco, no tubo ciego: los headers salientes hacia Deno se arman
+// desde cero en api/_lib/proxySeguro.ts (nunca se reenvían los del cliente
+// tal cual, para que un Origin falsificado no llegue nunca al backend).
+import { rechazarOrigenFalso, headersProxy } from './_lib/proxySeguro';
+
 export const config = { runtime: 'edge' };
 
 export default async function handler(request: Request): Promise<Response> {
@@ -19,6 +25,9 @@ export default async function handler(request: Request): Promise<Response> {
     });
   }
 
+  const origenRechazado = rechazarOrigenFalso(request);
+  if (origenRechazado) return origenRechazado;
+
   const backendUrl = process.env['BACKEND_URL'];
   if (!backendUrl) {
     return new Response(JSON.stringify({ error: 'Backend no configurado.' }), {
@@ -27,23 +36,10 @@ export default async function handler(request: Request): Promise<Response> {
     });
   }
 
-  // x-forwarded-for: Vercel la agrega en la petición entrante con la IP real
-  // del cliente. Sin reenviarla explícitamente aquí, el fetch saliente no la
-  // trae — el backend vería la IP de Vercel para todos los usuarios y su
-  // rate limiting por IP (ver main.ts::obtenerIpCliente) quedaría compartido
-  // entre clientes distintos en vez de aislado por persona.
-  const ipCliente = request.headers.get('x-forwarded-for') ?? '';
-  const authorization = request.headers.get('authorization') ?? '';
-  const origin = request.headers.get('origin') ?? '';
-
   const url = new URL(request.url);
   const backendRes = await fetch(`${backendUrl}/mis-pedidos${url.search}`, {
     method: 'GET',
-    headers: {
-      ...(ipCliente ? { 'x-forwarded-for': ipCliente } : {}),
-      ...(authorization ? { 'authorization': authorization } : {}),
-      ...(origin ? { 'origin': origin } : {}),
-    },
+    headers: headersProxy(request),
   });
 
   const respBody = await backendRes.text();
